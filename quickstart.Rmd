@@ -1,0 +1,552 @@
+---
+title: "C3.ai COVID-19 Data Lake Quickstart in R"
+output: html_notebook
+---
+
+# C3.ai COVID-19 Data Lake Quickstart in R  
+This R notebook shows some examples of how to access and use each of the [C3.ai COVID-19 Data Lake](https://c3.ai/covid/) APIs. These examples show only a small piece of what you can do with the C3.ai COVID-19 Data Lake, but will get you started with performing your own exploration. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
+
+Please contribute your questions, answers and insights on [Stack Overflow](https://www.stackoverflow.com). Tag `c3ai-datalake` so that others can view and help build on your contributions. For support, please send email to: [covid@c3.ai](mailto:covid@c3.ai).
+
+To view an outline of this notebook, use the RStudio keyboard shortcut Control + Shift + O on Windows or Command + Shift + O on Mac. 
+
+Import the tidyverse (version >= 1.3.0), httr, jsonlite, and fitdistrplus libraries to use this notebook.
+```{r}
+if (!require(tidyverse)) install.packages('tidyverse')
+if (!require(httr)) install.packages('httr')
+if (!require(jsonlite)) install.packages('jsonlite')
+if (!require(fitdistrplus)) install.packages('fitdistrplus')
+
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(fitdistrplus)
+```
+
+## Helper methods for accessing the API
+
+The helper methods below convert a JSON response from the C3.ai APIs to a Tibble. Please run this cell before using the quickstart examples.
+```{r}
+# read_data_json directly accesses the C3.ai COVID-19 Data Lake APIs using the requests library, 
+# and returns the response as a JSON, raising an error if the call fails for any reason.
+# ------
+# typename: The type you want to access, i.e. 'OutbreakLocation', 'LineListRecord', 'BiblioEntry', etc.
+# api: The API you want to access, either 'fetch' or 'evalmetrics'.
+# body: The spec you want to pass. For examples, see the API documentation.
+read_data_json <- function(typename, api, body) {
+  
+  # get the JSON response
+  resp <- POST(
+    str_c("https://api.c3.ai/covid/api/1/", typename, "/", api),
+    body = body %>% toJSON(auto_unbox = TRUE),
+    accept("application/json")
+  )
+  
+  # if there was an error, report it
+  if (http_error(resp)) {
+    stop(
+      sprintf(
+        "API request failed [%s]\n%s", 
+        status_code(resp),
+        content(resp)$message
+      ),
+      call. = FALSE
+    )
+  }
+  
+  resp
+}
+
+# fetch accesses the Data Lake using read_data_json, and converts the response into a Tibble.
+# fetch is used for all non-timeseries data in the Data Lake, and will call read_data as many times 
+# as required to access all of the relevant data for a given typename and body.
+# ------
+# typename: The type you want to access, i.e. 'OutbreakLocation', 'LineListRecord', 'BiblioEntry', etc.
+# body: The spec you want to pass. For examples, see the API documentation.
+# get_all: If TRUE, get all records and ignore any limit argument passed in the body. If FALSE, use the limit argument passed in the body. The default is FALSE.
+# remove_meta: If TRUE, remove metadata about each record. If FALSE, include it. The default is TRUE.
+fetch <- function(typename, body, get_all = FALSE, remove_meta = TRUE) {
+  
+  # if get_all is TRUE, call fetch until all the data has been accessed
+  if(get_all) {
+    has_more <- TRUE
+    offset <- 0
+    df <- NULL
+    limit <- 2000
+    
+    while (has_more) {
+      body[["spec"]][["limit"]] <- limit
+      body[["spec"]][["offset"]] <- offset
+      
+      resp <- read_data_json(typename, "fetch", body)
+      has_more <- content(resp)$hasMore
+      offset <- offset + limit
+      df <- bind_rows(df, content(resp)$objs %>% enframe())
+    }
+  } 
+  
+  # if get_all is FALSE, just call fetch once
+  else {
+    resp <- read_data_json(typename, "fetch", body)
+    df <- content(resp)$objs %>% 
+      enframe()
+  }
+  
+  # reformat the data for easy access
+  df <- 
+    df %>% 
+    dplyr::select(-name) %>% 
+    unnest_wider(col = c(value), names_repair = "unique") %>% 
+    mutate_at(vars(contains("Date")), parse_datetime)
+
+  # remove meta and version if remove_meta is TRUE
+  if(remove_meta) {
+    df %>% dplyr::select(-meta, -version)
+  } else {
+    df
+  }
+}
+
+# evalmetrics accesses the Data Lake using read_data_json, and converts the response into a Tibble.
+# evalmetrics is used for all timeseries data in the Data Lake.
+# ------
+# typename: The C3.ai Type you want to access, i.e. 'OutbreakLocation', 'LineListRecord', 'BiblioEntry', etc.
+# body: The spec you want to pass. For examples, see the API documentation.
+# get_all: If TRUE, get all metrics and ignore limits on number of expressions and ids. If FALSE, consider expressions and ids limits. The default is FALSE.
+# remove_meta: If TRUE, remove metadata about each record. If FALSE, include it. The default is TRUE.
+evalmetrics <- function(typename, body, get_all = FALSE, remove_meta = TRUE) {
+
+  # if get_all is TRUE, call EvalMetrics until all the data has been accessed
+  # use a loop to bypass limit of 10 IDs and 4 Expressions per call
+  if (get_all && ((length(body$spec$ids) > 10) || (length(body$spec$expressions) > 4))) {
+    ids_raw <- unlist(body$spec$ids)
+    id_groups <- split(ids_raw, ceiling(seq_along(ids_raw)/10))
+    expressions_raw <- unlist(body$spec$expressions)
+    expression_groups <- split(expressions_raw, ceiling(seq_along(expressions_raw)/4))
+    
+    df <- NULL
+    
+    # for each set of IDs and Expressions, get the JSON EvalMetrics response and convert to dataframe
+    for (ids in id_groups) {
+      for (expressions in expression_groups) {
+        body$spec$ids <- as.list(ids)
+        body$spec$expressions <- as.list(expressions)
+        resp <- read_data_json(typename, "evalmetrics", body)
+        df <- bind_rows(df, content(resp)$result %>% enframe())
+      }
+    }
+  } 
+  
+  # get the JSON EvalMetrics response and convert to dataframe
+  else {
+    resp <- read_data_json(typename, "evalmetrics", body)
+    df <- content(resp)$result %>% enframe()
+  }
+  
+  # reformat the data for easy access
+  df <- 
+    df %>% 
+    unnest_longer(value) %>% 
+    unnest_wider(value) %>% 
+    unnest(cols = everything()) %>% 
+    select_at(vars(!matches("unit"))) %>% 
+    mutate_all(unlist) %>% 
+    mutate(dates = as.POSIXct(dates))
+  
+  if(remove_meta) {
+    df %>% dplyr::select(-type, -count, -timeZone, -interval, -start, -end)
+  } else {
+    df
+  }
+}
+```
+
+
+## Access OutbreakLocation data
+
+OutbreakLocation stores location data such as countries, provinces, cities, where COVID-19 outbeaks are recorded. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/OutbreakLocation) and [Excel file of available locations](https://c3.ai/wp-content/uploads/2020/04/C3-ai-Location-IDs.xlsx) for more details.
+```{r}
+# Fetch facts about Germany
+locations <- fetch(
+    "outbreaklocation",
+    list(
+      spec = list(
+        filter = "id == 'Germany'"
+      )
+    )
+)
+
+locations %>% 
+  dplyr::select(-location) %>% 
+  unnest_wider(fips, names_sep = ".")
+```
+
+```{r}
+# Total number of confirmed cases, deaths, and recoveries in Santa Clara, California
+today <- Sys.Date()
+
+casecounts <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = list("SantaClara_California_UnitedStates"),
+      expressions = list("JHU_ConfirmedCases", "JHU_ConfirmedDeaths", "JHU_ConfirmedRecoveries"),
+      start = "2020-01-01",
+      end = today,
+      interval = "DAY"
+    )
+  )
+)
+
+casecounts
+```
+
+Plot these counts.
+```{r}
+casecounts %>% 
+  ggplot(aes(dates, data, color = value_id)) +
+  geom_line() +
+  facet_wrap(vars(name)) +
+  labs(
+    x = "Date",
+    y = "Count",
+    color = "Metric"
+  )
+```
+
+Export case counts as a .csv file.
+```{r}
+# Uncomment the line below to export the Tibble as a .csv file
+# casecounts %>% write_csv("casecounts.csv")
+```
+
+Demographic and economic data from the US Census Bureau and The World Bank allow demographic comparisons across locations. 
+```{r}
+# Fetch global demographic data
+population <- fetch(
+  "populationdata",
+  list(
+    spec = list(
+      filter = "!contains(parent, '_') && (populationAge == '>=65' || populationAge == 'Total') && gender == 'Male/Female' && year == '2018' && estimate == 'False' && percent == 'False'"
+    )
+  ),
+  get_all = TRUE
+)
+
+population_age_distribution <- 
+  population %>% 
+  mutate(location = map_chr(parent, ~.[[1]])) %>% 
+  drop_na(value) %>% 
+  dplyr::select(location, populationAge, value) %>% 
+  pivot_wider(names_from = populationAge, values_from = value) %>% 
+  mutate(proportion_over_65 = `>=65` / Total) %>% 
+  arrange(desc(proportion_over_65))
+
+population_age_distribution
+```
+
+Access global death counts
+```{r}
+# Retrieve global deaths as of May 1
+global_deaths <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = population_age_distribution$location,
+      expressions = list("JHU_ConfirmedDeaths"),
+      start = "2020-05-01",
+      end = "2020-05-01",
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+)
+
+global_deaths
+```
+
+Plot the results.
+```{r}
+global_deaths %>% 
+  dplyr::select(name, total_deaths = data) %>% 
+  
+  # Bring the two datasets together
+  inner_join(population_age_distribution, by = c("name" = "location")) %>% 
+  mutate(deaths_per_million = 1e6 * total_deaths / Total) %>% 
+  
+  # Plot the data
+  ggplot(aes(proportion_over_65, deaths_per_million)) +
+  geom_point() +
+  geom_text(
+    aes(label = name),
+    data = . %>% top_frac(0.05, wt = deaths_per_million),
+    hjust = -0.2,
+    vjust = -0.1,
+    size = 2
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(
+    title = "Several countries have high COVID-19 death rates and older populations",
+    subtitle = "Using data from The World Bank and Johns Hopkins University",
+    x = "Proportion of population over 65",
+    y = "Confirmed COVID-19 deaths\nper million people"
+  )
+```
+
+
+## Access LineListRecord data
+
+LineListRecord stores individual-level crowdsourced information from laboratory-confirmed COVID-19 patients. Information includes gender, age, symptoms, travel history, location, reported onset, confirmation dates, and discharge status. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/LineListRecord) for more details.
+```{r}
+# Fetch the line list records tracked by MOBS Lab
+records <- fetch(
+  "linelistrecord",
+  list(
+    spec = list(
+      filter = "lineListSource == 'DXY'"
+    )
+  ),
+  get_all = TRUE
+)
+
+records %>% 
+  unnest_wider(location, names_sep = ".")
+```
+
+What were the most common symptoms in the dataset?
+```{r}
+records %>% 
+  
+  # Get all the symptoms, which are initially comma-separated
+  mutate(symptoms = map(symptoms, ~str_split(., ", "))) %>% 
+  unnest_longer(symptoms) %>% 
+  unnest_longer(symptoms) %>% 
+  filter(!is.na(symptoms)) %>%
+  
+  # Plot the data, removing uncommon symptoms
+  mutate(symptoms = fct_infreq(symptoms)) %>% 
+  mutate(symptoms = fct_lump_prop(symptoms, prop = 0.01)) %>% 
+  mutate(symptoms = fct_rev(symptoms)) %>% 
+  ggplot(aes(symptoms)) +
+  geom_histogram(stat = "count") +
+  coord_flip() +
+  labs(
+    x = "Symptom",
+    y = "Number of patients",
+    title = "Common COVID-19 symptoms"
+  )
+```
+
+If a patient is symptomatic and later hospitalized, how long does it take for them to become hospitalized after developing symptoms?
+```{r}
+# Get the number of days from development of symptoms to hospitalization for each patient
+hospitalization_times <- 
+  records %>% 
+  filter(symptomStartDate <= hospitalAdmissionDate) %>% 
+  mutate(hospitalization_time = as.integer(hospitalAdmissionDate - symptomStartDate) / (24 * 60 * 60)) %>%
+  # Hospitalization time of 0 days is replaced with 0.1 to indicate near-immediate hospitalization
+  mutate(hospitalization_time = if_else(hospitalization_time == 0, 0.1, hospitalization_time)) %>% 
+  pull(hospitalization_time)
+
+# Fit a gamma distribution
+parameters <- fitdist(hospitalization_times, "gamma")$estimate
+gamma_dist <- 
+  tibble(x = seq(0, max(hospitalization_times), 0.01)) %>% 
+  mutate(y = dgamma(x, shape = parameters[["shape"]], rate = parameters[["rate"]]))
+
+# Plot the results
+ggplot() +
+  geom_histogram(
+    aes(hospitalization_times, y = ..density..), 
+    bins = max(hospitalization_times) + 1
+  ) +
+  geom_line(
+    aes(x, y), 
+    data = gamma_dist, 
+    color = "red", 
+    alpha = 0.6, 
+    size = 2
+  ) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  labs(
+    x = "Days from development of symptoms to hospitalization",
+    y = "Proportion of patients",
+    title = "Distribution of time to hospitalization"
+  )
+```
+
+
+## Join BiologicalAsset and Sequence data
+
+BiologicalAsset stores the metadata of the genome sequences collected from SARS-CoV-2 samples in the National Center for Biotechnology Information Virus Database. Sequence stores the genome sequences collected from SARS-CoV-2 samples in the National Center for Biotechnology Information Virus Database. See the API documentation for [BiologicalAsset](https://c3.ai/covid-19-api-documentation/#tag/BiologicalAsset) and [Sequence](https://c3.ai/covid-19-api-documentation/#tag/Sequence) for more details.
+```{r}
+# Join data from BiologicalAsset & Sequence C3.ai Types
+sequences <- fetch(
+  "biologicalasset",
+  list(
+    spec = list(
+      include = "this, sequence.sequence",
+      filter = "exists(sequence.sequence)"
+    )
+  ),
+  get_all = TRUE
+)
+
+sequences
+```
+
+## Access BiblioEntry data
+
+BiblioEntry stores the metadata about the journal articles in the CORD-19 Dataset. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/BiblioEntry) for more details.
+```{r}
+# Fetch metadata for the first two thousand (2000) BiblioEntry journal articles approved for commercial use
+# Note that 2000 records are returned; the full dataset can be accessed using the get_all = TRUE argument in fetch
+bibs <- fetch(
+  "biblioentry",
+  body = list(
+    spec = list(
+      filter = "hasFullText == true"
+    )
+  ),
+)
+
+# Sort them to get the most recent articles first
+bibs_sorted <- 
+  bibs %>% 
+  mutate(publishTime = parse_datetime(publishTime)) %>%
+  arrange(desc(publishTime))
+
+bibs_sorted
+```
+
+Use GetArticleMetadata to access the full-text of these articles, or in this case, the first page text.
+```{r}
+# Get the ID of the most recent published article in March
+bib_id <- 
+  bibs_sorted %>% 
+  filter(publishTime < "2020-04-01") %>% 
+  head(1) %>% 
+  pull(id)
+
+bib_id
+
+# Get the full-text, in JSON-format, of the journal article from the CORD-19 dataset
+article_data <- read_data_json(
+  "biblioentry", 
+  "getarticlemetadata", 
+  list(
+    ids = list(bib_id)
+  )
+)
+content(article_data)$value$value[[1]]$body_text[[1]]$text
+```
+
+## Join TherapeuticAsset and ExternalLink data
+
+TherapeuticAsset stores details about the research and development (R&D) of coronavirus therapies, for example, vaccines, diagnostics, and antibodies. ExternalLink stores website URLs cited in the data sources containing the therapies stored in the TherapeuticAssets C3.ai Type. See the API documentation for [TherapeuticAsset](https://c3.ai/covid-19-api-documentation/#tag/TherapeuticAsset) and [ExternalLink](https://c3.ai/covid-19-api-documentation/#tag/ExternalLink) for more details.
+```{r}
+# Join data from TherapeuticAsset & ExeternalLink C3.ai Types (productType, description, origin, and URL links)
+assets <- fetch(
+  "therapeuticasset",
+  list(
+    spec = list(
+      include = "productType, description, origin, links.url",
+      filter = "origin == 'Milken'"
+    )
+  )
+)
+
+assets %>% 
+  unnest(links, keep_empty = TRUE) %>% 
+  mutate(url = map_chr(links, ~if_else(is.null(.), NA_character_, .$url))) %>% 
+  dplyr::select(-links)
+```
+
+## Join Diagnosis and DiagnosisDetail data
+
+Diagnosis stores basic clinical data (e.g. clinical notes, demographics, test results, x-ray or CT scan images) about individual patients tested for COVID-19, from research papers and healthcare institutions. DiagnosisDetail stores detailed clinical data (e.g. lab tests, pre-existing conditions, symptoms) about individual patients in key-value format. See the API documentation for [Diagnosis](https://c3.ai/covid-19-api-documentation/#tag/Diagnosis) and [DiagnosisDetail](https://c3.ai/covid-19-api-documentation/#tag/DiagnosisDetail) for more details.
+```{r}
+# Join data from Diagnosis & DiagnosisDetail C3.ai Types
+diagnoses <- fetch(
+  "diagnosis",
+  list(
+    spec = list(
+      filter = "contains(testResults, 'COVID-19')", 
+      include = "this, diagnostics.source, diagnostics.key, diagnostics.value"
+    )
+  )
+)
+
+# Convert the data into long format
+diagnoses_long <- 
+  diagnoses %>% 
+  unnest_longer(diagnostics) %>% 
+  mutate(
+    diagnostic_key = map_chr(diagnostics, ~.$key),
+    diagnostic_value = map_chr(diagnostics, ~.$value),
+  ) 
+
+diagnoses_long
+
+# Convert the data into a wide, sparse table
+diagnoses_wide <- 
+  diagnoses_long %>% 
+  dplyr::select(-diagnostics) %>% 
+  pivot_wider(names_from = diagnostic_key, values_from = diagnostic_value) %>% 
+  type_convert()
+
+diagnoses_wide
+```
+
+Use the GetImageURLs API to view the image associated with a diagnosis.
+```{r}
+diagnosis_id <- diagnoses_wide$id[[1]]
+
+image_urls <- read_data_json(
+  "diagnosis", 
+  "getimageurls", 
+  list(
+    ids = list(diagnosis_id)
+  )
+)
+
+# Open the browser to the image URL
+browseURL(content(image_urls)$value[[diagnosis_id]]$value)
+```
+
+## Access Policy data
+
+Policy stores COVID-19 social distancing and health policies and regulations enacted by US states. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/Policy) for more details.
+```{r}
+policies <- fetch(
+  "policy",
+  list(
+    spec = list(
+      limit = -1
+    )
+  )
+)
+
+policies %>% 
+  unnest_wider(location, names_sep = ".")
+```
+
+Use the AllVersionsForPolicy API to access historical and current versions of a policy.
+```{r}
+versions <- read_data_json(
+  "policy",
+  "allversionsforpolicy",
+  list(
+    this = list(
+      id = "Wisconsin_UnitedStates_Policy"
+    )
+  )
+)
+
+content(versions) %>% 
+  enframe() %>% 
+  dplyr::select(-name) %>% 
+  unnest_wider(col = c(value), names_repair = "unique") %>% 
+  unnest_wider(location, names_sep = ".")
+```
+
