@@ -12,3 +12,4 @@ dependencies:
   - r-httr
   - r-tidyverse
   - r-jsonlite
+  - r-fitdistrplus
