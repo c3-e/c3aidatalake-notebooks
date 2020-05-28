@@ -8,3 +8,7 @@ dependencies:
   - pandas=1.0.*
   - requests
   - scipy
+  - r-base
+  - r-httr
+  - r-tidyverse
+  - r-jsonlite
