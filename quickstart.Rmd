@@ -4,6 +4,9 @@ output: html_notebook
 ---
 
 # C3.ai COVID-19 Data Lake Quickstart in R  
+
+Version 3.0 (June 2, 2020)
+
 This R notebook shows some examples of how to access and use each of the [C3.ai COVID-19 Data Lake](https://c3.ai/covid/) APIs. These examples show only a small piece of what you can do with the C3.ai COVID-19 Data Lake, but will get you started with performing your own exploration. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
 
 Please contribute your questions, answers and insights on [Stack Overflow](https://www.stackoverflow.com). Tag `c3ai-datalake` so that others can view and help build on your contributions. For support, please send email to: [covid@c3.ai](mailto:covid@c3.ai).
@@ -57,8 +60,8 @@ read_data_json <- function(typename, api, body) {
   resp
 }
 
-# fetch accesses the Data Lake using read_data_json, and converts the response into a Tibble.
-# fetch is used for all non-timeseries data in the Data Lake, and will call read_data as many times 
+# fetch accesses the C3.ai COVID-19 Data Lake using read_data_json, and converts the response into a Tibble.
+# fetch is used for all non-timeseries data in the C3.ai COVID-19 Data Lake, and will call read_data as many times 
 # as required to access all of the relevant data for a given typename and body.
 # ------
 # typename: The type you want to access, i.e. 'OutbreakLocation', 'LineListRecord', 'BiblioEntry', etc.
@@ -107,8 +110,8 @@ fetch <- function(typename, body, get_all = FALSE, remove_meta = TRUE) {
   }
 }
 
-# evalmetrics accesses the Data Lake using read_data_json, and converts the response into a Tibble.
-# evalmetrics is used for all timeseries data in the Data Lake.
+# evalmetrics accesses the C3.ai COVID-19 Data Lake using read_data_json, and converts the response into a Tibble.
+# evalmetrics is used for all timeseries data in the C3.ai COVID-19 Data Lake.
 # ------
 # typename: The C3.ai Type you want to access, i.e. 'OutbreakLocation', 'LineListRecord', 'BiblioEntry', etc.
 # body: The spec you want to pass. For examples, see the API documentation.
@@ -159,12 +162,50 @@ evalmetrics <- function(typename, body, get_all = FALSE, remove_meta = TRUE) {
     df
   }
 }
+
+# getprojectionhistory accesses the C3.ai COVID-19 Data Lake using read_data_json, and converts the response into a Tibble.
+# ------
+# body: The API request body you want to pass. For examples, see the API documentation.
+# remove_meta: If TRUE, remove metadata about each record. If FALSE, include it. The default is TRUE.
+getprojectionhistory <- function(body, remove_meta = TRUE) {
+
+  # get the JSON GetProjectionHistory response
+  resp <- read_data_json(
+    "outbreaklocation", 
+    "getprojectionhistory", 
+    body
+  )
+
+  df <- 
+    content(resp) %>% 
+    enframe() %>% 
+    dplyr::select(-name) %>% 
+    unnest_wider(value) %>% 
+    dplyr::select(-type) %>% 
+    unnest_wider(value) %>% 
+    pivot_longer(everything()) %>% 
+    unnest_wider(value) %>% 
+    dplyr::select(-type) %>% 
+    unnest_longer(value) %>% 
+    unnest_wider(value) %>% 
+    unnest(cols = everything()) %>% 
+    mutate_all(unlist) %>% 
+    mutate(dates = as.POSIXct(dates)) %>% 
+    mutate(projection_date = str_remove(expr, ".* ") %>% as.POSIXct())
+
+  if(remove_meta) {
+    df %>% dplyr::select(-type, -count, -timeZone, -interval, -start, -end)
+  } else {
+    df
+  }
+}
 ```
 
 
 ## Access OutbreakLocation data
 
-OutbreakLocation stores location data such as countries, provinces, cities, where COVID-19 outbeaks are recorded. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/OutbreakLocation) and [Excel file of available locations](https://c3.ai/wp-content/uploads/2020/04/C3-ai-Location-IDs.xlsx) for more details.
+OutbreakLocation stores location data such as countries, provinces, cities, where COVID-19 outbeaks are recorded. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/OutbreakLocation) for more details and for a list of available locations.
+
 ```{r}
 # Fetch facts about Germany
 locations <- fetch(
@@ -181,6 +222,9 @@ locations %>%
   unnest_wider(fips, names_sep = ".")
 ```
 
+### Case counts
+
+A variety of sources provide counts of cases, deaths, recoveries, and other statistics for counties, provinces, and countries worldwide.
 ```{r}
 # Total number of confirmed cases, deaths, and recoveries in Santa Clara, California
 today <- Sys.Date()
@@ -220,6 +264,8 @@ Export case counts as a .csv file.
 # casecounts %>% write_csv("casecounts.csv")
 ```
 
+### Demographics
+
 Demographic and economic data from the US Census Bureau and The World Bank allow demographic comparisons across locations. 
 ```{r}
 # Fetch global demographic data
@@ -245,7 +291,7 @@ population_age_distribution <-
 population_age_distribution
 ```
 
-Access global death counts
+Access global death counts.
 ```{r}
 # Retrieve global deaths as of May 1
 global_deaths <- evalmetrics(
@@ -290,6 +336,106 @@ global_deaths %>%
     subtitle = "Using data from The World Bank and Johns Hopkins University",
     x = "Proportion of population over 65",
     y = "Confirmed COVID-19 deaths\nper million people"
+  )
+```
+
+### Mobility
+
+Mobility data from Apple and Google provide a view of the impact of COVID-19 and social distancing on mobility trends.
+```{r}
+mobility_trends <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = list("DistrictofColumbia_UnitedStates"),
+      expressions = list(
+        "Apple_WalkingMobility", 
+        "Apple_DrivingMobility",
+        "Google_ParksMobility",
+        "Google_ResidentialMobility"
+      ),
+      start = "2020-03-01",
+      end = "2020-04-01",
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+)
+
+mobility_trends
+```
+
+Plot these mobility trends.
+```{r}
+mobility_trends %>% 
+  ggplot(aes(dates, data/100, color = value_id)) +
+  geom_hline(aes(yintercept = 1), linetype = "dashed") +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(vars(name)) +
+  labs(
+    x = "Date",
+    y = "Mobility compared to baseline",
+    color = "Metric"
+  )
+```
+
+### Projections
+
+Use the GetProjectionHistory API to retrieve versioned time series projections for specific metrics made at specific points in time.
+```{r}
+# Retrieve projections made between April 13 and May 1 of mean total cumulative deaths in Spain from April 13 to May 13
+projections <- getprojectionhistory(
+  list(
+    outbreakLocation = "Spain",
+    metric = "UniversityOfWashington_TotdeaMean_Hist",
+    metricStart = "2020-04-13", 
+    metricEnd = "2020-05-13",
+    observationPeriodStart = "2020-04-13",
+    observationPeriodEnd = "2020-05-01"
+  )
+)
+
+projections
+```
+
+```{r}
+# Retrieve actual total cumulative deaths in Spain from April 1 to May 13
+deaths <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = list("Spain"),
+      expressions = list("JHU_ConfirmedDeaths"),
+      start = "2020-04-01",
+      end = "2020-05-13",
+      interval = "DAY"
+    )
+  )
+)
+
+deaths
+```
+
+Plot the results.
+```{r}
+ggplot() +
+  geom_line(
+    aes(dates, data), 
+    data = deaths, 
+    color = "black"
+  ) +
+  geom_line(
+    aes(dates, data, color = expr), 
+    data = projections %>% 
+      filter(dates >= projection_date)
+  ) +
+  facet_wrap(vars(name)) +
+  labs(
+    x = "Date",
+    y = "Count",
+    color = "Metric",
+    title = "Cumulative death count projections versus actual count"
   )
 ```
 
@@ -513,6 +659,42 @@ image_urls <- read_data_json(
 # Open the browser to the image URL
 browseURL(content(image_urls)$value[[diagnosis_id]]$value)
 ```
+
+## Access VaccineCoverage data
+
+VaccineCoverage stores historical vaccination rates for various demographic groups in US counties and states, based on data from the US Centers for Disease Control (CDC). See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/VaccineCoverage) for more details.
+```{r}
+vaccine_coverage <- fetch(
+  "vaccinecoverage",
+  list(
+    spec = list(
+      filter = "vaxView == 'Influenza' && contains(vaccineDetails, 'General Population') && (location == 'California_UnitedStates' || location == 'Texas_UnitedStates') && contains(demographicClass, 'Race/ethnicity') && year == 2018"
+    )
+  )
+)
+
+vaccine_coverage %>% 
+  unnest_wider(location, names_sep = ".")
+```
+
+How does vaccine coverage vary by race/ethnicity in these locations?
+```{r}
+vaccine_coverage %>% 
+  unnest_wider(location, names_sep = ".") %>% 
+  ggplot(aes(str_wrap(demographicClassDetails, 20), value/100, ymin = lowerLimit/100, ymax = upperLimit/100)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  facet_grid(cols = vars(location.id)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    x = NULL,
+    y = "Vaccination rate",
+    title = "Influenza vaccination rate by race/ethnicity",
+    subtitle = "Error bars indicate 95% confidence interval"
+  )
+```
+
 
 ## Access Policy data
 
