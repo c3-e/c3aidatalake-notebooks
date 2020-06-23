@@ -5,6 +5,8 @@ output: html_notebook
 
 # C3.ai COVID-19 Data Lake Deep Dive - Mobility and Case Counts
 
+Last updated: June 23, 2020.
+
 This R notebook shows some possible analyses using mobility and case count data in the C3.ai COVID-19 Data Lake. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
 
 Please contribute your questions, answers and insights on [Stack Overflow](https://www.stackoverflow.com). Tag `c3ai-datalake` so that others can view and help build on your contributions. For support, please send email to: [covid@c3.ai](mailto:covid@c3.ai).
@@ -33,7 +35,7 @@ The helper methods in `c3aidatalake.R` convert a JSON response from the C3.ai AP
 source("c3aidatalake.R")
 ```
 
-## Access state mobility and case count data
+## Access state mobility, device exposure, and case count data
 
 We will investigate state-level case count and mobility data across all U.S. states and territories with available data.
 
@@ -228,7 +230,7 @@ mobility_indices %>%
 
 Apple driving mobility shows much larger variation than the average of the Google non-residential indices, as of mid-June.
 
-How well do these values correlate?
+How correlated are Apple and Google mobility indices?
 
 ```{r}
 mobility_indices_wide <- 
@@ -310,7 +312,7 @@ We see that most states follow a pattern with three phases:
 
 In stage 3, for some states like New York, the rebound in mobility is faster than the rebound in DEX, indicating that visits are more frequently to less-crowded locations than they were before. For other states like Georgia, the rebound in DEX is faster than the rebound in mobility, indicating that visits may now be more frequent to crowded locations. States like Texas, Hawaii, and Nevada relatively closely trace their original path.
 
-# Comparing mobility, device exposure, and case counts
+## Compare mobility, device exposure, and case counts
 
 Now we can compare data across these four datasets.
 
@@ -335,7 +337,7 @@ bind_rows(
   facet_wrap(vars(name)) +
   labs(
     title = "Comparison of mobility, device exposure, and daily increase in case counts",
-    subtitle = "For visual inspection, not with appropriate units",
+    subtitle = "For visual inspection, units not directly comparable",
     x = NULL,
     y = "Smoothed daily increase in case counts; DEX; and Google mobility index",
     color = "Metric"
@@ -373,7 +375,116 @@ inner_join(
 
 There isn't a consistent relationship across states between the device exposure and the increase in case counts 7-14 days later. However, many states show consistent patterns: 
 - states with high early peaks like New York and New Jersey are showing relatively safe loosening of social distancing, as DEX increases and case counts decrease
-- other states like Florida and Texas are showing increasing DEX and increasing case counts
+- other states like Florida and Texas are showing simultaneously increasing DEX and increasing case counts
+
+## Investigate the relationship between counties
+
+To explore the relationship between locations, let's look at location exposure indices (LEX) between several counties in the San Francisco Bay Area. LEX refers to the fraction of mobile devices that pinged in locationTarget on a date that also pinged in locationVisited at least once during the previous 14 days. But first, we can look at mobility and case count data, as before.
+
+```{r}
+county_list <- c(
+  "SanFrancisco_California_UnitedStates", 
+  "SanMateo_California_UnitedStates", 
+  "Alameda_California_UnitedStates",
+  "SantaClara_California_UnitedStates"
+)
+
+county_timeseries <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = county_list,
+      expressions = list(
+        "JHU_ConfirmedCases",
+        "Apple_DrivingMobility",
+        "Apple_TransitMobility",
+        "PlaceIQ_DeviceExposure_Adjusted"
+      ),
+      start = "2020-02-15",
+      end = end_date,
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>% 
+  select(-missing)
+
+county_timeseries
+```
+
+```{r, fig.width = 5, fig.height = 3}
+county_timeseries %>% 
+  group_by(name, value_id) %>% 
+  arrange(dates) %>% 
+  filter(!str_detect(value_id, "Apple") | !(as.character(dates) %in% c("2020-05-11", "2020-05-12"))) %>% 
+  mutate(data = if_else(value_id == "JHU_ConfirmedCases", data - lag(data), data)) %>% 
+  mutate(data_smoothed = rollmean(data, 7, align = "right", fill = NA)) %>% 
+  ungroup() %>% 
+  ggplot(aes(dates, data_smoothed, color = name)) +
+  geom_line() +
+  facet_grid(rows = vars(value_id), scales = "free") +
+  labs(
+    x = NULL,
+    y = "Smoothed value",
+    title = "All four counties showed similar mobility and device exposure patterns, \nbut Alameda faces spike in June",
+    color = "County"
+  )
+```
+
+All four counties show similar DEX and mobility, but Alameda has higher case counts in June. What do the location exposure indices show?
+
+```{r}
+lex <- NULL
+
+for (i in 1:length(county_list)) {
+  for (j in 1:length(county_list)) {
+    resp <- read_data_json(
+      "locationexposure", 
+      "getlocationexposures", 
+      list(
+        spec = list(
+          locationTarget = county_list[[i]],
+          locationVisited = county_list[[j]],
+          start = "2020-01-20",
+          end = end_date
+        )
+      )
+    )
+    
+    lex <- bind_rows(
+      lex, 
+      content(resp)$locationExposures$value %>% 
+        enframe() %>% 
+        unnest_wider(value) %>% 
+        mutate(timestamp = as.POSIXct(timestamp)) %>% 
+        select(-name)
+    )
+  }
+}
+
+lex
+```
+
+```{r, fig.width = 5, fig.height = 3}
+lex %>% 
+  filter(locationTarget != locationVisited) %>% 
+  ggplot(aes(timestamp, value, color = locationVisited)) +
+  geom_line() +
+  facet_wrap(vars(locationTarget)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    x = NULL,
+    y = "Location exposure index (LEX)",
+    color = "Location visited",
+    title = "Even with social distancing, Bay Area counties show close relationships",
+    subtitle = "As of mid-June, approximately 20% of devices in other counties had visited Alameda in last 14 days"
+  )
+```
+
+Location exposure shows the relationships between counties. For example, San Francisco shows a much stronger relationship with San Mateo than Santa Clara: even at maximum social distancing, approximately 35% of devices in San Francisco had visited San Mateo in the last 14 days, while only approximately 7% of devices in San Francisco had visited Santa Clara in the last 14 days. In general, Alameda and Santa Clara show lower location exposure to the other counties, while San Mateo and San Francisco show higher exposure to the other counties.
+
+---
 
 There are plenty of other analyses to explore. In bringing together data sets from disparate sources, the C3.ai COVID-19 Data Lake permits in-depth and real-time data exploration. 
 
