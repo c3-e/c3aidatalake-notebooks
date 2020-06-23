@@ -1,0 +1,380 @@
+---
+title: "C3.ai COVID-19 Data Lake Deep Dive - Mobility and Case Counts"
+output: html_notebook
+---
+
+# C3.ai COVID-19 Data Lake Deep Dive - Mobility and Case Counts
+
+This R notebook shows some possible analyses using mobility and case count data in the C3.ai COVID-19 Data Lake. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
+
+Please contribute your questions, answers and insights on [Stack Overflow](https://www.stackoverflow.com). Tag `c3ai-datalake` so that others can view and help build on your contributions. For support, please send email to: [covid@c3.ai](mailto:covid@c3.ai).
+
+To view an outline of this notebook, use the RStudio keyboard shortcut Control + Shift + O on Windows or Command + Shift + O on Mac. 
+
+```{r}
+if (!require(tidyverse)) install.packages('tidyverse')
+if (!require(httr)) install.packages('httr')
+if (!require(jsonlite)) install.packages('jsonlite')
+if (!require(zoo)) install.packages('zoo')
+if (!require(lubridate)) install.packages('lubridate')
+
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(zoo)
+library(lubridate)
+```
+
+## Helper methods for accessing the API
+
+The helper methods in `c3aidatalake.R` convert a JSON response from the C3.ai APIs to a Tibble. You may wish to view the code in `c3aidatalake.R` before continuing.
+
+```{r}
+source("c3aidatalake.R")
+```
+
+## Access state mobility and case count data
+
+We will investigate state-level case count and mobility data across all U.S. states and territories with available data.
+
+```{r}
+states <- fetch(
+    "outbreaklocation",
+    list(
+      spec = list(
+        filter = "contains(id, 'UnitedStates') && locationType == 'state'"
+      )
+    ),
+    get_all = TRUE
+) %>% 
+  select(-location) %>% 
+  unnest_wider(fips, names_sep = ".") %>% 
+  select(id, everything()) %>% 
+  filter(id != "Washington,D.C._UnitedStates")
+
+states
+```
+
+We will explore the following datasets:
+- Confirmed case counts from Johns Hopkins University: COVID-19 Data Repository
+- Walking, driving, and transit mobility indices from Apple: COVID-19 Mobility Trends
+- Parks, residential, retail, grocery, transit stations, and workplaces mobility from Google: COVID-19 Community Mobility Reports
+- Device exposure indices from PlaceIQ Exposure Indices
+
+```{r}
+end_date <- Sys.Date() - ddays(7)
+
+complete_timeseries <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = states$id,
+      expressions = list(
+        "JHU_ConfirmedCases",
+        "Apple_WalkingMobility", 
+        "Apple_DrivingMobility",
+        "Apple_TransitMobility",
+        "Google_ParksMobility",
+        "Google_ResidentialMobility",
+        "Google_RetailMobility",
+        "Google_GroceryMobility",
+        "Google_TransitStationsMobility",
+        "Google_WorkplacesMobility",
+        "PlaceIQ_DeviceExposure_Adjusted"
+      ),
+      start = "2020-02-15",
+      end = end_date,
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>% 
+  select(-missing)
+
+complete_timeseries
+```
+
+## Explore case count data
+
+Let's first explore case count data. In order to make trends more visible, we will take a 7-day lagging average of the available data.
+```{r}
+casecounts <- 
+  complete_timeseries %>% 
+  filter(value_id == "JHU_ConfirmedCases") %>% 
+  group_by(name) %>% 
+  arrange(dates) %>% 
+  mutate(daily_increase = data - lag(data)) %>% 
+  mutate(daily_increase_smoothed = rollmean(daily_increase, 7, align = "right", fill = NA)) %>% 
+  ungroup() %>% 
+  full_join(states %>% select("id", "populationCDS"), by = c("name" = "id")) %>% 
+  mutate(daily_increase_smoothed_per_100k = 100000 * daily_increase_smoothed / populationCDS)
+
+casecounts
+```
+
+```{r, fig.width = 8, fig.height = 8}
+casecounts %>% 
+  filter(!is.na(daily_increase_smoothed_per_100k)) %>% 
+  mutate(name = fct_reorder(name, daily_increase_smoothed_per_100k, .fun = max, .desc = TRUE)) %>% 
+  ggplot(aes(dates, daily_increase_smoothed_per_100k)) +
+  geom_line() +
+  facet_wrap(vars(name)) +
+  labs(
+    x = NULL,
+    y = "Daily increase per 100k population",
+    title = "Daily increase in case count per 100k people, averaged over previous 7 days"
+  )
+```
+
+The daily increase in case counts in some states continues to rise, while those with severe early peaks (such as New York, New Jersey, and Massachusetts) are largely stabilizing.
+
+```{r}
+state_casecounts_summary <- 
+  casecounts %>% 
+  filter(!is.na(daily_increase_smoothed)) %>% 
+  group_by(name) %>% 
+  summarize(
+    daily_cases_max = max(daily_increase_smoothed, na.rm = TRUE),
+    daily_cases_max_date = last(dates, daily_increase_smoothed),
+    daily_cases_last = last(daily_increase_smoothed),
+    daily_cases_30days_ago = nth(daily_increase_smoothed, -30),
+    daily_cases_change_last_30days = (daily_cases_last / daily_cases_30days_ago) - 1
+  ) %>% 
+  arrange(daily_cases_change_last_30days)
+
+state_casecounts_summary
+```
+
+```{r, fig.height = 5, fig.width = 5}
+state_casecounts_summary %>% 
+  mutate(name = name %>% str_remove("_UnitedStates") %>% fct_reorder(daily_cases_change_last_30days)) %>% 
+  ggplot(aes(name, daily_cases_change_last_30days)) +
+  geom_col() +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Change in daily case count over last 30 days",
+    title = "Change in daily case count over last 30 days"
+  )
+```
+
+As of the release of this notebook on June 23, states were approximately evenly split in having increasing or decreasing daily case counts.
+
+## Explore mobility data
+
+Now let's explore mobility data from Google and Apple, and compare the two sources.
+
+```{r}
+mobility <- 
+  complete_timeseries %>% 
+  filter(str_detect(value_id, "Google|Apple")) %>% 
+  filter(!str_detect(value_id, "Apple") | !(as.character(dates) %in% c("2020-05-11", "2020-05-12"))) %>% # Apple data not available May 11-12
+  group_by(name, value_id) %>% 
+  arrange(dates) %>% 
+  mutate(mobility_smoothed = rollmean(data, 7, align = "right", fill = NA)) %>% 
+  ungroup()
+
+mobility
+```
+
+```{r, fig.width = 8, fig.height = 8}
+mobility %>%
+  ggplot(aes(dates, mobility_smoothed/100, color = value_id)) +
+  geom_hline(aes(yintercept = 1), linetype = "dashed") +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(vars(name)) +
+  labs(
+    x = "Date",
+    y = "Mobility compared to baseline",
+    color = "Metric",
+    title = "Mobility indices by state"
+  )
+```
+
+All states showed a decrease in non-residential mobility in early April. However, the depth of the decrease varied widely by state. Many states have shown a large increase in mobility to parks (as measured by Google) and mobility via driving (as measured by Apple) since the early shelter-in-place period.
+
+How do the measurements vary between Google and Apple?
+
+```{r}
+mobility_indices <- 
+  mobility %>% 
+  filter(value_id %in% c("Google_RetailMobility", "Google_TransitStationsMobility", "Google_WorkplacesMobility", "Google_GroceryMobility", "Google_ParksMobility")) %>% 
+  group_by(name, dates) %>% 
+  summarize(mobility_smoothed = mean(mobility_smoothed)) %>% 
+  ungroup() %>% 
+  mutate(value_id = "Google_SummaryMobility") %>% 
+  bind_rows(
+    mobility %>% 
+      filter(value_id == "Apple_DrivingMobility") %>% 
+      select(-data)
+  )
+
+mobility_indices %>% 
+  ggplot(aes(dates, mobility_smoothed/100, color = name)) +
+  geom_line(alpha = 0.2, size = 3) +
+  scale_y_continuous(labels = scales::percent) +
+  facet_grid(cols = vars(value_id)) +
+  theme(legend.position = "none") +
+  labs(
+    x = NULL,
+    y = "Smoothed mobility index",
+    title = "Smoothed mobility indices"
+  )
+```
+
+Apple driving mobility shows much larger variation than the average of the Google non-residential indices, as of mid-June.
+
+How well do these values correlate?
+
+```{r}
+mobility_indices_wide <- 
+  mobility_indices %>% 
+  pivot_wider(names_from = value_id, values_from = mobility_smoothed)
+
+lm_result <- lm(mobility_indices_wide$Apple_DrivingMobility ~ mobility_indices_wide$Google_SummaryMobility)
+summary(lm_result)
+rsq <- summary(lm_result)$r.squared
+
+mobility_indices_wide %>% 
+  ggplot(aes(Google_SummaryMobility, Apple_DrivingMobility)) +
+  geom_point(aes(color = name), alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  theme(legend.position = "none") +
+  labs(
+    title = "Correlation between Apple and Google mobility indices",
+    subtitle = str_glue("R-squared value: {scales::number(rsq, accuracy = 0.01)}")
+  )
+```
+
+The measurements correlate relatively well, indicating that we can stick to one for the rest of our analysis.
+
+## Explore device exposure data
+
+The device exposure index (DEX) from PlaceIQ and UC Berkeley refers to the average number of distinct devices that visited any of the commercial venues that a particular smartphone at this location visited on a given day. In this way, it provides a rough approximation of social distancing that does not rely on mapping data, as the Google and Apple datasets do.
+
+```{r}
+exposure <- 
+  complete_timeseries %>% 
+  filter(value_id == "PlaceIQ_DeviceExposure_Adjusted") %>% 
+  group_by(name, value_id) %>% 
+  arrange(dates) %>% 
+  mutate(exposure_smoothed = rollmean(data, 7, align = "right", fill = NA)) %>% 
+  ungroup()
+
+exposure
+```
+
+```{r}
+exposure %>% 
+  ggplot(aes(dates, exposure_smoothed, color = name)) +
+  geom_line(alpha = 0.2, size = 3) +
+  theme(legend.position = "none") +
+  labs(
+    x = NULL,
+    y = "Smoothed device exposure index (DEX)",
+    title = "Smoothed device exposure index (DEX)"
+  )
+```
+
+State device exposure indices show a similar pattern to the mobility indices, with a severe drop in late March, followed by an increase in May. However, for many states the DEX values have not gotten close to their pre-pandemic values. 
+
+Let's look at how DEX relates to the Google mobility index over time for each state.
+
+```{r, fig.width = 8, fig.height = 8}
+exposure %>% 
+  select(name, dates, exposure_smoothed) %>% 
+  inner_join(mobility_indices_wide, by = c("name", "dates")) %>% 
+  ggplot(aes(exposure_smoothed, Google_SummaryMobility, color = name)) +
+  geom_path(aes(alpha = dates), size = 1) +
+  facet_wrap(vars(name), scales = "free") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "Relationship between PlaceIQ DEX and Google mobility index over time",
+    subtitle = "Darker line indicates more recent data",
+    x = "Device exposure index (DEX)",
+    y = "Google summarized mobility index"
+  )
+```
+
+This plot holds a lot of information.
+
+We see that most states follow a pattern with three phases:
+1. Decreasing DEX without substantial change in mobility, indicating a decrease in visits to crowded commercial places without a decrease in overall mobility
+2. Decreasing DEX and mobility, indicating substantial social distancing
+3. Increasing DEX and mobility, indicating a loosening of social distancing
+
+In stage 3, for some states like New York, the rebound in mobility is faster than the rebound in DEX, indicating that visits are more frequently to less-crowded locations than they were before. For other states like Georgia, the rebound in DEX is faster than the rebound in mobility, indicating that visits may now be more frequent to crowded locations. States like Texas, Hawaii, and Nevada relatively closely trace their original path.
+
+# Comparing mobility, device exposure, and case counts
+
+Now we can compare data across these four datasets.
+
+Let's compare the data for 
+
+```{r, fig.width = 6}
+bind_rows(
+   mobility_indices %>% 
+    filter(value_id == "Google_SummaryMobility") %>% 
+    select(name, dates, value_id, data = mobility_smoothed),
+  casecounts %>% 
+    filter(value_id == "JHU_ConfirmedCases") %>% 
+    select(name, dates, value_id, data = daily_increase_smoothed_per_100k),
+  exposure %>% 
+    filter(value_id == "PlaceIQ_DeviceExposure_Adjusted") %>% 
+    select(name, dates, value_id, data = exposure_smoothed),
+) %>% 
+  filter(name %in% c("California_UnitedStates", "NewYork_UnitedStates", "Louisiana_UnitedStates")) %>% 
+  group_by(dates, value_id) %>% 
+  ggplot(aes(dates, data, color = value_id)) +
+  geom_line() +
+  facet_wrap(vars(name)) +
+  labs(
+    title = "Comparison of mobility, device exposure, and daily increase in case counts",
+    subtitle = "For visual inspection, not with appropriate units",
+    x = NULL,
+    y = "Smoothed daily increase in case counts; DEX; and Google mobility index",
+    color = "Metric"
+  )
+```
+
+The Google mobility index looks very similar across all three locations, with some variation in the depth of the drop in April. However, the device exposure shows a wide variation in initial baseline value. California has the lowest of the three, while New York has a much higher starting DEX. Louisiana has a much more rapid increase in DEX than the other two locations, and New York had the highest peak daily increase in case count.
+
+Let's look at DEX and case count data after the loosening of social distancing restrictions after May 1. We'll compare DEX data against the case count for 7-14 days later.
+
+```{r, fig.width = 8, fig.height = 8}
+inner_join(
+  exposure %>% 
+    filter(value_id == "PlaceIQ_DeviceExposure_Adjusted") %>% 
+    select(name, dates, exposure_smoothed),
+  casecounts %>% 
+    filter(value_id == "JHU_ConfirmedCases") %>% 
+    select(name, dates, daily_increase_smoothed_per_100k) %>% 
+    mutate(dex_date = dates - ddays(14)) %>% 
+    filter(dates > "2020-05-01"),
+  by = c("name", "dates" = "dex_date")
+) %>% 
+  mutate(name = fct_reorder(name, daily_increase_smoothed_per_100k, .fun = max, .desc = TRUE)) %>% 
+  ggplot(aes(exposure_smoothed, daily_increase_smoothed_per_100k, color = name, alpha = dates)) +
+  geom_path() +
+  geom_point() +
+  facet_wrap(vars(name), scales = "free") +
+  theme(legend.position = "none") +
+  labs(
+    x = "Device exposure index (DEX)",
+    y = "Daily increase in case count per 100k people",
+    title = "States show wide variation in relationship between mobility and case count"
+  )
+```
+
+There isn't a consistent relationship across states between the device exposure and the increase in case counts 7-14 days later. However, many states show consistent patterns: 
+- states with high early peaks like New York and New Jersey are showing relatively safe loosening of social distancing, as DEX increases and case counts decrease
+- other states like Florida and Texas are showing increasing DEX and increasing case counts
+
+There are plenty of other analyses to explore. In bringing together data sets from disparate sources, the C3.ai COVID-19 Data Lake permits in-depth and real-time data exploration. 
+
+If any publications or research results are derived in full or in part from the C3.ai COVID-19 Data Lake, please make sure to credit the C3.ai COVID-19 Data Lake by referencing the case study at https://c3.ai/customers/covid-19-data-lake/.
