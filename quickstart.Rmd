@@ -5,7 +5,7 @@ output: html_notebook
 
 # C3.ai COVID-19 Data Lake Quickstart in R  
 
-Version 4.0 (June 23, 2020)
+Version 5.0 (August 11, 2020)
 
 This R notebook shows some examples of how to access and use each of the [C3.ai COVID-19 Data Lake](https://c3.ai/covid/) APIs. These examples show only a small piece of what you can do with the C3.ai COVID-19 Data Lake, but will get you started with performing your own exploration. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
 
@@ -40,12 +40,12 @@ OutbreakLocation stores location data such as countries, provinces, cities, wher
 ```{r}
 # Fetch facts about Germany
 locations <- fetch(
-    "outbreaklocation",
-    list(
-      spec = list(
-        filter = "id == 'Germany'"
-      )
+  "outbreaklocation",
+  list(
+    spec = list(
+      filter = "id == 'Germany'"
     )
+  )
 )
 
 locations %>% 
@@ -269,6 +269,76 @@ ggplot() +
     title = "Cumulative death count projections versus actual count"
   )
 ```
+
+### Economic indicators
+
+GDP and employment statistics by business sector from the US Bureau of Economic Analysis enable comparisons of the drivers of local economies. 
+
+```{r}
+# Real GDP for AccommodationAndFoodServices and FinanceAndInsurance in Alameda County, California
+realgdp <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = list("Alameda_California_UnitedStates"),
+      expressions = list(
+        "BEA_RealGDP_AccommodationAndFoodServices_2012Dollars",
+        "BEA_RealGDP_FinanceAndInsurance_2012Dollars"
+      ),
+      start = "2000-01-01",
+      end = "2020-01-01",
+      interval = "YEAR"
+    )
+  ),
+  get_all = TRUE
+)
+
+realgdp
+```
+
+High frequency spending and earnings data from Opportunity Insights allow tracking of near real-time economic trends.
+
+```{r}
+# Access consumer spending in healthcare and low income earnings in the healthcare and social assistance sector in California
+opportunityinsights <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = list("California_UnitedStates"),
+      expressions = list(
+        "OIET_Affinity_SpendHcs",
+        "OIET_LowIncEmpAllBusinesses_Emp62"
+      ),
+      start = "2020-01-01",
+      end = "2020-06-01",
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+)
+
+opportunityinsights
+```
+
+Plot the results.
+```{r}
+opportunityinsights %>%
+  ggplot() +
+  geom_line(aes(x = dates, y = data, color = value_id)) +
+  labs(
+    x = 'Date',
+    y = 'Change relative to January 4-31',
+    title = 'California low-income earnings and consumer spending in healthcare',
+    color = ''
+  ) +
+  scale_y_continuous(
+    breaks = seq(-1, 1, 0.2),
+    labels = scales::percent_format(1)
+  ) +
+  scale_x_datetime(date_breaks = "1 month", date_labels = "%b") + 
+  theme(legend.position = "bottom")
+```
+
 
 ## Access LocationExposure data
 
@@ -503,7 +573,7 @@ diagnoses <- fetch(
   "diagnosis",
   list(
     spec = list(
-      filter = "contains(testResults, 'COVID-19')", 
+      filter = "contains(testResults, 'COVID-19')",
       include = "this, diagnostics.source, diagnostics.key, diagnostics.value"
     )
   )
@@ -512,6 +582,7 @@ diagnoses <- fetch(
 # Convert the data into long format
 diagnoses_long <-
   diagnoses %>% 
+  filter(source != 'UCSD') %>%
   unnest_longer(diagnostics) %>% 
   mutate(
     diagnostic_key = map_chr(diagnostics, ~.$key),
@@ -640,5 +711,62 @@ school_policies <- fetch(
 
 school_policies %>% 
   unnest_wider(location, names_sep = ".")
+```
+
+
+## Access LaborDetail data
+
+LaborDetail stores historical monthly labor force and employment data for US counties and states from US Bureau of Labor Statistics. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/LaborDetail) for more details. 
+```{r}
+# Fetch the unemployment rates of counties in California in March, 2020
+labordetail <- fetch(
+  "labordetail",
+  list(
+    spec = list(
+      filter = "year == 2020 && month == 3 && contains(parent, 'California_UnitedStates')"
+    )
+  ),
+  get_all = TRUE
+)
+
+labordetail %>% 
+  unnest_wider(parent, names_sep = ".")
+```
+
+## Access Survey data
+
+SurveyData stores COVID-19-related public opinion, demographic, and symptom prevalence data collected from COVID-19 survey responses. See the [API documentation](https://c3.ai/covid-19-api-documentation/#tag/SurveyData) for more details. 
+```{r}
+# Fetch participants who are located in California and who have a relatively strong intent to wear a mask in public because of COVID-19
+survey <- fetch(
+  "surveydata",
+  list(
+    spec = list(
+      filter = "location == 'California_UnitedStates' && coronavirusIntent_Mask >= 75"
+    )
+  ),
+  get_all = TRUE
+)
+
+survey %>% 
+  unnest_wider(location, names_sep = ".")
+```
+
+Plot the results.
+```{r}
+survey %>% 
+  mutate(coronavirusEmployment = str_split(coronavirusEmployment, ", ")) %>%
+  unnest_longer(coronavirusEmployment) %>%
+  count(coronavirusEmployment) %>% 
+  mutate(coronavirusEmployment = fct_reorder(coronavirusEmployment, n, .desc = TRUE)) %>% 
+  ggplot(aes(coronavirusEmployment, n/nrow(survey))) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Employment status of CA participants with strong intent to wear mask",
+    x = "Response to employment status question",
+    y = "Proportion of participants"
+  )
 ```
 
