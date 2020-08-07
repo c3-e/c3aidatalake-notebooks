@@ -1,0 +1,735 @@
+---
+title: "C3.ai COVID-19 Data Lake Deep Dive"
+subtitle: "Economic Effects of the Pandemic"
+output:
+  html_document: 
+    number_sections: no
+    highlight: haddock
+    theme: journal
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+Last updated: August 11, 2020.
+
+This R notebook highlights the diverse economic datasets integrated into the C3.ai COVID-19 Data Lake. See the [API documentation](https://c3.ai/covid-19-api-documentation/) for more details.
+
+Please contribute your questions, answers and insights on [Stack Overflow](https://www.stackoverflow.com). Tag `c3ai-datalake` so that others can view and help build on your contributions. For support, please send email to: [covid@c3.ai](mailto:covid@c3.ai).
+
+
+
+```{r, warning=FALSE, message=FALSE}
+if (!require(tidyverse)) install.packages('tidyverse')
+if (!require(jsonlite)) install.packages('jsonlite')
+if (!require(maps)) install.packages('maps')
+if (!require(mapproj)) install.packages('mapproj')
+
+library(tidyverse)
+library(jsonlite)
+library(maps)
+library(mapproj)
+
+options(scipen = 999)
+```
+
+The following code adjusts the theme for plotting and knitting this notebook. Comment it out if you would prefer to use the standard theme or if you encounter errors.
+```{r, warning=FALSE, message=FALSE}
+if (!require(hrbrthemes)) install.packages('hrbrthemes')
+library(hrbrthemes)
+theme_set(theme_ipsum())
+```
+
+A number of helper functions have been created in `c3aidatalake.R` for easier API calls.
+
+```{r, warning=FALSE, message=FALSE}
+source("c3aidatalake.R")
+```
+
+
+## API Calls
+
+We will investigate how the pandemic has affected US state economies.
+
+```{r}
+states <- list(
+  'Alabama_UnitedStates','Alaska_UnitedStates','Arizona_UnitedStates',
+  'Arkansas_UnitedStates','California_UnitedStates','Colorado_UnitedStates',
+  'Connecticut_UnitedStates','Delaware_UnitedStates','DistrictofColumbia_UnitedStates',
+  'Florida_UnitedStates','Georgia_UnitedStates','Hawaii_UnitedStates',
+  'Idaho_UnitedStates','Illinois_UnitedStates','Indiana_UnitedStates',
+  'Iowa_UnitedStates','Kansas_UnitedStates','Kentucky_UnitedStates',
+  'Louisiana_UnitedStates','Maine_UnitedStates','Maryland_UnitedStates',
+  'Massachusetts_UnitedStates','Michigan_UnitedStates','Minnesota_UnitedStates',
+  'Mississippi_UnitedStates','Missouri_UnitedStates','Montana_UnitedStates',
+  'Nebraska_UnitedStates','Nevada_UnitedStates','NewHampshire_UnitedStates',
+  'NewJersey_UnitedStates','NewMexico_UnitedStates','NewYork_UnitedStates',
+  'NorthCarolina_UnitedStates','NorthDakota_UnitedStates','Ohio_UnitedStates',
+  'Oklahoma_UnitedStates','Oregon_UnitedStates','Pennsylvania_UnitedStates',
+  'PuertoRico_UnitedStates','RhodeIsland_UnitedStates','SouthCarolina_UnitedStates',
+  'SouthDakota_UnitedStates','Tennessee_UnitedStates','Texas_UnitedStates',
+  'Utah_UnitedStates','Vermont_UnitedStates','Virginia_UnitedStates',
+  'Washington_UnitedStates','WestVirginia_UnitedStates','Wisconsin_UnitedStates',
+  'Wyoming_UnitedStates'
+)
+```
+
+
+### Business Sectors
+
+The US Bureau of Economic Analysis (BEA) reports detailed data on the makeup of the US economy. Here, we will pull employment by various business sectors along with total employment. This data is reported annually.
+
+
+```{r, eval=TRUE}
+end_date <- "2020-07-23"
+
+employment_states <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = states,
+      expressions = list(
+        "BEA_Employment_AccommodationAndFoodServices_Jobs",
+        "BEA_Employment_Accommodation_Jobs",
+        "BEA_Employment_AirTransportation_Jobs",
+        "BEA_Employment_ArtsEntertainmentAndRecreation_Jobs",
+        "BEA_Employment_CreditIntermediationAndRelatedActivities_Jobs",
+        "BEA_Employment_DataProcessingHostingAndRelatedServices_Jobs",
+        "BEA_Employment_EducationalServices_Jobs",
+        "BEA_Employment_FarmEmployment_Jobs",
+        "BEA_Employment_FinanceAndInsurance_Jobs",
+        "BEA_Employment_FoodServicesAndDrinkingPlaces_Jobs",
+        "BEA_Employment_GovernmentAndGovernmentEnterprises_Jobs",
+        "BEA_Employment_HealthCareAndSocialAssistance_Jobs",
+        "BEA_Employment_Hospitals_Jobs",
+        "BEA_Employment_Information_Jobs",
+        "BEA_Employment_InsuranceCarriersAndRelatedActivities_Jobs",
+        "BEA_Employment_Manufacturing_Jobs",
+        "BEA_Employment_OilAndGasExtraction_Jobs",
+        "BEA_Employment_RealEstateAndRentalAndLeasing_Jobs",
+        "BEA_Employment_RetailTrade_Jobs",
+        "BEA_Employment_SocialAssistance_Jobs",
+        "BEA_Employment_StateAndLocal_Jobs",
+        "BEA_Employment_TotalEmployment_Jobs",
+        "BEA_Employment_TransitAndGroundPassengerTransportation_Jobs",
+        "BEA_Employment_TransportationAndWarehousing_Jobs",
+        "BEA_Employment_TruckTransportation_Jobs",
+        "BEA_Employment_WarehousingAndStorage_Jobs"
+      ),
+      start = "2015-01-01",
+      end = end_date,
+      interval = "YEAR"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>%
+  select(-missing) %>%
+  mutate(state = str_replace(name, '_UnitedStates', ''))
+```
+
+
+
+### Unemployment Statistics
+
+The US Bureau of Labor Statistics reports measures including the size of the labor force and the unemployment rate monthly. Let's request unemployment rates at a state level along with confirmed COVID-19 case counts provided by Johns Hopkins University.
+
+```{r, eval=TRUE}
+unemployment_states <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = states,
+      expressions = list(
+        "BLS_UnemploymentRate",
+        "JHU_ConfirmedCases"
+      ),
+      start = "2018-01-01",
+      end = end_date,
+      interval = "MONTH"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>%
+  select(-missing) %>%
+  mutate(state = str_replace(name, '_UnitedStates', ''))
+```
+
+
+
+## Case Counts
+
+We can begin by exploring how COVID-19 case counts have grown in US states. 
+
+```{r case_count1, fig.height = 6, fig.width = 8, fig.align = "center"}
+high_case_states <- unemployment_states %>% 
+  filter(dates == '2020-07-01') %>% 
+  filter(value_id == 'JHU_ConfirmedCases') %>%
+  filter(data > 1e5) %>%
+  pull(name)
+
+unemployment_states %>%
+  filter(value_id == 'JHU_ConfirmedCases') %>%
+  filter(dates >= '2020-02-01') %>%
+  filter(name %in% high_case_states) %>%
+  ggplot() + geom_line(aes(x = dates, y = data, colour = state)) + 
+  labs(
+    x='Date', 
+    y='Cumulative Case Count', 
+    title='Cumulative Case Counts by State',
+    colour='State'
+  ) + 
+  theme(legend.position = "bottom")
+```
+
+Among the states with high case counts, it appears that there are two distinct trends.
+
+
+```{r case_count2, fig.height = 6, fig.width = 8, fig.align = "center"}
+outbreak_states <- c(
+  "NewYork_UnitedStates",
+  "NewJersey_UnitedStates",
+  "Massachusetts_UnitedStates",
+  "Illinois_UnitedStates",
+  "Georgia_UnitedStates",
+  "California_UnitedStates",
+  "Arizona_UnitedStates",
+  "Florida_UnitedStates",
+  "Texas_UnitedStates"
+)
+
+early_states <- c(
+  "NewYork_UnitedStates",
+  "NewJersey_UnitedStates",
+  "Massachusetts_UnitedStates",
+  "Illinois_UnitedStates"
+)
+
+unemployment_states %>%
+  filter(value_id == 'JHU_ConfirmedCases') %>%
+  filter(dates >= '2020-02-01') %>%
+  filter(name %in% outbreak_states) %>%
+  mutate(early = ifelse(
+    name %in% early_states, 
+    'Early Outbreak', 
+    'Late Outbreak'
+  )) %>%
+  ggplot() + 
+  geom_line(aes(x=dates, y=data, colour=state)) +
+  facet_grid(cols=vars(early)) +
+  labs(
+    x='Date', 
+    y='Cumulative Case Count', 
+    title='State Case Counts by Stage of Outbreak',
+    colour='State'
+  ) +
+  theme(legend.position="bottom")
+```
+
+States like Massachusetts, New Jersey, and especially New York show a sharp rise in cases early in March before their growth slows considerably. On the other hand, states like Florida, California, and Arizona show a large spike beginning in May.
+
+
+## Unemployment
+
+### Outbreak Timing
+
+Since states had severe outbreaks at different times, we can investigate whether there were differential effects on their economies.
+
+
+```{r unemp1, fig.height = 6, fig.width = 8, fig.align = "center"}
+unemployment_states %>%
+  filter(value_id == 'BLS_UnemploymentRate') %>%
+  filter((dates >= '2020-01-01') & (dates < '2020-07-01')) %>%
+  filter(name %in% outbreak_states) %>%
+  mutate(early = ifelse(name %in% early_states, 'Early Outbreak', 'Late Outbreak')) %>%
+  ggplot() + 
+  geom_line(aes(x=dates, y=data, colour=state)) +
+  geom_point(aes(x=dates, y=data, colour=state)) +
+  facet_grid(cols=vars(early)) +
+  labs(
+    x='Date', 
+    y='Unemployment Rate (%)', 
+    title='State Unemployment Rates by Stage of Outbreak',
+    colour='State'
+  ) +
+  theme(legend.position="bottom")
+```
+
+The early outbreak states had immediate and long lasting impacts to their labor forces. The late outbreak states saw unemployment begin to spike at the same time, but their unemployment rates had lower peaks and have declined much more quickly in May and June.
+
+
+```{r unemp2, fig.height = 6, fig.width = 8, fig.align = "center"}
+unemployment_states %>%
+  filter(value_id %in% c('JHU_ConfirmedCases', 'BLS_UnemploymentRate')) %>%
+  filter((dates >= '2020-01-01') & (dates < '2020-07-01')) %>%
+  filter(name %in% early_states) %>%
+  mutate(early = ifelse(name %in% early_states, 'Early Outbreak', 'Late Outbreak')) %>%
+  mutate(label = ifelse(value_id == 'JHU_ConfirmedCases', 'Case Count', 'Unemp. Rate (%)')) %>%
+  ggplot() + geom_line(aes(x = dates, y = data, colour = state)) +
+  facet_grid(rows=vars(label), scales = 'free') +
+  labs(
+    x='Date',
+    y='',
+    title='Cases vs Unemployment for Early Outbreak States',
+    colour='State'
+  ) +
+  theme(
+    legend.position="bottom",
+    strip.text.y = element_text(size = 10)
+  )
+```
+Zeroing in on the early outbreak states, it appears that differences in the timing and severity of their outbreaks did not lead to differences in the shock to their labor markets.
+
+
+### State Labor Markets
+
+The pandemic and business closures have had a significant effect on unemployment across states, but digging into the data, we can see that not all states were affected equally. 
+Some states like Nevada saw over 1 in 4 workers categorized as unemployed, while other states have seen much more modest economic shocks for now.
+
+
+```{r map1, fig.height = 6, fig.width = 8, fig.align = "center"}
+us_states <- map_data("state") %>% 
+  mutate(state_name = str_replace_all(region, " ", ""))
+
+map_date <- '2020-04-01'
+
+us_states %>%
+  left_join(
+    unemployment_states %>%
+      mutate(state_name = str_to_lower(str_replace(name, "_UnitedStates", ""))) %>%
+      filter(dates == map_date) %>%
+      filter(value_id == 'BLS_UnemploymentRate') %>%
+      filter(!is.na(data)),
+    by = "state_name"
+  ) %>% 
+  ggplot(aes(x=long, y=lat, group=group, fill=data)) + 
+  geom_polygon(color="black", size=0.3) +
+  coord_map(projection="albers", lat0=39, lat1=45) +
+  labs(
+    title=str_interp('Unemployment Rate by State on ${map_date}'),
+    fill='Unemp. Rate (%)'
+  ) + 
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank()
+  ) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    values = seq(0, 30, 1) %>% scales::rescale(),
+    breaks = seq(0, 30, 5),
+    limits = c(0, 30)
+  ) +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 5,
+      barheight = 1.5,
+      nbin = 6,
+      raster = FALSE,
+      ticks = FALSE,
+      direction = "horizontal"
+    )
+  )
+```
+
+
+
+```{r map2, fig.height = 8, fig.width = 8, fig.align = "center"}
+us_states %>%
+  select(long, lat, group, state_name) %>%
+  left_join(
+    unemployment_states %>%
+      mutate(state_name = str_to_lower(str_replace(name, "_UnitedStates", ""))) %>%
+      filter((dates >= '2020-01-01') & (dates < '2020-07-01')) %>%
+      filter(value_id == 'BLS_UnemploymentRate') %>%
+      filter(!is.na(data)),
+    by = "state_name"
+  ) %>%
+  ggplot(aes(x = long, y = lat, group = group, fill=data)) + 
+  geom_polygon(color = "black", size = 0.3) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  facet_wrap(. ~ dates, ncol = 2, scales = "fixed", drop=T) + 
+  labs(
+    title='US Unemployment Rates, Jan - June 2020',
+    fill='Unemp. Rate (%)'
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank()
+  ) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    values = seq(0, 30, 1) %>% scales::rescale(),
+    breaks = seq(0, 30, 5),
+    limits = c(0, 30)
+  ) +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 5,
+      barheight = 1.5,
+      nbin = 6,
+      raster = FALSE,
+      ticks = FALSE,
+      direction = "horizontal"
+    )
+  )
+
+```
+
+While unemployment rates have declined from their peaks in many states, the US is still far from pre-pandemic economic conditions.
+
+
+## State Industries
+
+The differences in labor market impact could in part be a reflection of industry specializations in each state. Lockdowns and safety concerns have altered how consumers spend their time and money, and some states are less prepared for a distanced economy than others.
+
+```{r sector1, fig.height = 6, fig.width = 11, fig.align = "center"}
+unemp_by_state <- unemployment_states %>% 
+  filter((value_id == 'BLS_UnemploymentRate') & (dates == '2020-06-01')) %>%
+  pivot_wider(names_from=value_id, values_from=data) %>%
+  select(-dates)
+
+employment_compare <- employment_states %>%
+  filter(dates == '2018-01-01') %>%
+  filter(value_id != "BEA_Employment_TotalEmployment_Jobs") %>%
+  inner_join(
+    employment_states %>%
+      filter(dates == '2018-01-01') %>%
+      filter(value_id == "BEA_Employment_TotalEmployment_Jobs") %>%
+      mutate(totalEmployment = data) %>%
+      select(name, totalEmployment),
+    by='name'
+  ) %>%
+  mutate(percentEmployment = data * 100.0 / totalEmployment) %>%
+  mutate(sector = str_replace_all(value_id, c('BEA_Employment_|_Jobs'), ''))
+
+grid_data <- employment_compare %>%
+  filter(name %in% c(
+    'Nevada_UnitedStates', 
+    'Michigan_UnitedStates', 
+    'Washington_UnitedStates'
+  )) %>% 
+  group_by(state) %>%
+  top_n(5, percentEmployment) %>% 
+  ungroup() %>%
+  arrange(state, desc(percentEmployment)) %>%
+  mutate(order = row_number()) 
+
+grid_data %>%
+  ggplot(aes(x=order, y=percentEmployment, fill=sector)) +
+  geom_bar(stat='identity') +
+  facet_grid(cols=vars(state), scales="free") +
+  scale_x_continuous(
+    breaks = grid_data$order,
+    labels = grid_data$sector,
+    expand = c(0,0)
+  ) +
+  labs(
+    x="Business Sector", 
+    y='% of Total Employment', 
+    title="2018 Biggest Employment Sectors"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size=9),
+    legend.position = "none"
+  )
+```
+Nevada's extreme unemployment rate makes sense in a world where travelers are scarce and casinos are closed. Michigan has an outsized exposure to manufacturing industries while Washington has large numbers of office workers.
+
+On the other hand, there are some industries that every state nurtures.  
+
+```{r sector2, fig.height = 6, fig.width = 10, fig.align = "center"}
+employment_compare %>%
+  inner_join(unemp_by_state, by='state') %>%
+  filter(value_id == 'BEA_Employment_FoodServicesAndDrinkingPlaces_Jobs') %>%
+  ggplot(aes(x = reorder(state, percentEmployment))) + 
+  geom_bar(
+    aes(y=percentEmployment), 
+    stat='identity', 
+    alpha=.8, 
+    width = 0.7, 
+    fill='navy'
+  ) +
+  labs(
+    x='State',
+    y='% of Total Employment',
+    title='Food Service Work as % of State Employment'
+  ) +
+  theme(axis.text.x = element_text(angle = 55, hjust = 1, size=10)) 
+```
+All states have food service workers, and while travel destinations like Hawaii or Nevada might have somewhat more, the impact of closing restaurants is felt throughout the US economy. 
+
+```{r sector3, fig.height = 8, fig.width = 10, fig.align = "center"}
+employment_compare %>%
+  filter(sector %in% c(
+    'Manufacturing',
+    'FarmEmployment',
+    "OilAndGasExtraction",
+    "TransitAndGroundPassengerTransportation"
+  )) %>%
+  mutate(shortName = case_when(
+    sector == 'FarmEmployment' ~ "Farms",
+    sector == 'OilAndGasExtraction' ~ "Oil&Gas",
+    sector == 'TransitAndGroundPassengerTransportation' ~ "Ground Transit",
+    TRUE ~ sector
+  )) %>%
+  ggplot() + 
+  geom_bar(aes(x = state, y=percentEmployment, fill=sector), stat='identity') +
+  facet_grid(rows=vars(shortName), scale='free_y') +
+  labs(
+    x='State',
+    y='% of Total Employment',
+    title='Percent of State Employment by Industry'
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y = element_text(hjust = 1, size = 9),
+    strip.text.y = element_text(size = 10, colour = "black")
+  ) 
+```
+
+States have specialized in certain industries and tend to have distinct profiles when compared to one another. We can see farming states tend to differ from those that have more manufacturing, oil, or transit workers.
+
+## Business and Spending Trends
+
+This economic crisis is fast-moving, and the COVID-19 Data Lake provides easy access to high frequency economic indicators. Data sourced from the Opportunity Insights Economic Tracker allows us to explore small business revenues, consumer spending, and low income earnings and employment among other useful measures. 
+
+Let's start by looking at data indicating whether merchants were open (measured by Womply), and earnings data for low income workers. Both datasets are broken out by the income level (low, middle, high) of the neighborhoods in which the business is located, as well as some industry categories like food services or professional services. The data is reported as relative values to their levels during the weeks of January 4-31, 2020.
+
+```{r, eval=TRUE}
+high_frequency <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = states,
+      expressions = list(
+        "OIET_WomplyMerchants_MerchantsInchigh",
+        "OIET_WomplyMerchants_MerchantsInclow",
+        "OIET_WomplyMerchants_MerchantsIncmiddle",
+        "OIET_WomplyMerchants_MerchantsSs60", #Professional and Business Services 
+        "OIET_WomplyMerchants_MerchantsSs70", #Leisure and Hospitality
+        "OIET_LowIncEarningsAllBusinesses_Pay72", #Accommodation and Food Services
+        "OIET_LowIncEarningsAllBusinesses_PayInclow",
+        "OIET_LowIncEarningsAllBusinesses_PayIncmiddle",
+        "OIET_LowIncEarningsAllBusinesses_PayInchigh"
+      ),
+      start = "2020-01-01",
+      end = end_date,
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>%
+  select(-missing) %>%
+  mutate(state = str_replace(name, '_UnitedStates', ''))
+```
+
+
+
+Nebraska retained one of the lowest unemployment rates among states, so let's see whether we can understand how their economy is functioning.
+
+```{r state_measures, fig.height = 6, fig.width = 10, fig.align = "center"}
+high_frequency %>%
+  filter(str_detect(value_id, c("Womply|LowIncEarningsAllBusinesses"))) %>%
+  mutate(variable = ifelse(
+    str_detect(value_id, "Womply"), 
+    "Businesses Open", 
+    "Low Income Earnings")
+  ) %>%
+  mutate(value_id = (
+    str_replace_all(
+      value_id, 
+      c('OIET_|LowIncEarningsAllBusinesses_|WomplyMerchants_'), 
+      ''
+    )
+  )) %>%
+  filter(name == 'Nebraska_UnitedStates') %>%
+  filter(dates < '2020-06-01') %>%
+  ggplot() + 
+  geom_hline(yintercept=0, size=0.5, alpha=0.25) +
+  geom_line(aes(x = dates, y=data, colour=value_id)) + 
+  facet_grid(cols=vars(variable)) +
+  labs(
+    x='Date',
+    y='Relative Value',
+    title='Nebraska Economic Conditions Relative to Jan 4-31, 2020',
+    colour=''
+  ) +
+  scale_y_continuous(
+    breaks=seq(-1, 1, 0.1),
+    labels = scales::percent_format(1)
+  ) +
+  scale_x_datetime(date_breaks = "1 month", date_labels = "%b") + 
+  theme(legend.position="bottom")
+```
+
+
+Small businesses in professional services seem to be open at a higher rate than in January, while the other measured business openings are still 5-10% below their reference levels. While low wage workers saw a severe drop in earnings in March and April, that decline has reversed in recent months, especially for workers in food service and employed at businesses in high income neighborhoods.
+
+Let's compare this outcome with New York:
+
+
+```{r state_measures2, fig.height = 6, fig.width = 10, fig.align = "center"}
+high_frequency %>%
+  filter(str_detect(value_id, c("Womply|LowIncEarningsAllBusinesses"))) %>%
+  mutate(variable = ifelse(
+    str_detect(value_id, "Womply"), 
+    "Businesses Open", 
+    "Low Income Earnings")
+  ) %>%
+  mutate(value_id = (
+    str_replace_all(
+      value_id, 
+      c('OIET_|LowIncEarningsAllBusinesses_|WomplyMerchants_'), 
+      ''
+    )
+  )) %>%
+  filter(name == 'NewYork_UnitedStates') %>%
+  filter(dates < '2020-06-01') %>%
+  ggplot() + 
+  geom_hline(yintercept=0, size=0.5, alpha=0.25) +
+  geom_line(aes(x = dates, y=data, colour=value_id)) + 
+  facet_grid(cols=vars(variable)) +
+  labs(
+    x='Date',
+    y='Relative Value',
+    title='New York Economic Conditions Relative to Jan 4-31, 2020',
+    colour=''
+  ) +
+  scale_y_continuous(
+    breaks=seq(-1, 1, 0.1),
+    labels = scales::percent_format(1)
+  ) +
+  scale_x_datetime(date_breaks = "1 month", date_labels = "%b") + 
+  theme(legend.position="bottom")
+```
+
+Here we see similar trends but without as sharp a rebound. While professional services are again open at higher rates than their January levels, other sectors are still 20% down in June. The earnings picture is also much worse - earnings for food service workers are still over 50% below January levels.
+
+
+
+```{r earnings, fig.height = 6, fig.width = 9, fig.align = "center"}
+
+high_frequency %>%
+  filter(name %in% outbreak_states) %>%
+  mutate(early = ifelse(
+    name %in% early_states, 
+    'Early Outbreak', 
+    'Late Outbreak'
+  )) %>%
+  filter(dates > '2020-03-01') %>%
+  filter(str_detect(value_id, "OIET_LowIncEarningsAllBusinesses_Pay72")) %>%
+  ggplot() + 
+  geom_hline(yintercept=0, size=0.5, alpha=0.25) +
+  geom_line(aes(x=dates, y=data, colour=state)) + 
+  facet_grid(cols=vars(early)) +
+  labs(
+    x='Date',
+    y='Relative Value',
+    title='Low Income Earnings for Food Service Workers by Outbreak Period',
+    colour='State'
+  ) +
+  scale_y_continuous(
+    breaks=seq(-1, 1, 0.1),
+    labels = scales::percent_format(1)
+  ) +
+  scale_x_datetime(date_breaks = "1 month", date_labels = "%b") + 
+  theme(legend.position="bottom")
+```
+Comparing early and late outbreak states, the early states had a somewhat larger economic shock and have struggled to rebound as quickly. However, all states dealing with large COVID-19 outbreaks saw a severe impact on low income earnings.
+
+
+```{r, eval=TRUE}
+high_frequency_cities <- evalmetrics(
+  "outbreaklocation",
+  list(
+    spec = list(
+      ids = c(
+        "NewYorkCity_NewYork_UnitedStates",
+        "SanFrancisco_California_UnitedStates",
+        "Chicago_Illinois_UnitedStates"
+      ),
+      expressions = list(
+        "OIET_WomplyMerchants_MerchantsSs60",
+        "OIET_WomplyMerchants_MerchantsSs70",
+        "OIET_LowIncEmpAllBusinesses_Emp72", #Employment: Accommodation and Food Services
+        "OIET_LowIncEmpAllBusinesses_EmpInclow",
+        "OIET_LowIncEmpAllBusinesses_EmpIncmiddle",
+        "OIET_LowIncEmpAllBusinesses_EmpInchigh",
+        "OIET_LowIncEarningsAllBusinesses_Pay72", #Earnings: Accommodation and Food Services
+        "OIET_LowIncEarningsAllBusinesses_PayInclow",
+        "OIET_LowIncEarningsAllBusinesses_PayIncmiddle",
+        "OIET_LowIncEarningsAllBusinesses_PayInchigh",
+        "OIET_Affinity_SpendAcf", #Spending: Accommodation and Food Services
+        "OIET_Affinity_SpendAer", #Spending: Arts, Entertainment, and Recreation
+        "OIET_Affinity_SpendApg", #Spending: General Merchandise and Apparel
+        "OIET_Affinity_SpendGrf" #Spending: Grocery and Food Stores
+      ),
+      start = "2020-01-01",
+      end = end_date,
+      interval = "DAY"
+    )
+  ),
+  get_all = TRUE
+) %>% 
+  filter(missing == 0) %>%
+  select(-missing) %>%
+  mutate(city = sub("_\\S*", "", name))
+
+```
+
+These high frequency indicators are also available at a more local level for large US cities.
+
+```{r three_cities, fig.height = 8, fig.width = 12, fig.align = "center"}
+
+high_frequency_cities %>%
+  filter(name %in% c(
+    "SanFrancisco_California_UnitedStates", 
+    "NewYorkCity_NewYork_UnitedStates", 
+    "Chicago_Illinois_UnitedStates"
+  )) %>%
+  filter(value_id %in% c(
+    "OIET_LowIncEarningsAllBusinesses_PayInclow",
+    "OIET_LowIncEarningsAllBusinesses_PayInchigh",
+    "OIET_Affinity_SpendAcf",
+    "OIET_Affinity_SpendAer",
+    "OIET_Affinity_SpendApg",
+    "OIET_Affinity_SpendGrf" 
+  )) %>%
+  mutate(value_type = ifelse(
+    str_detect(value_id, "Affinity"), 
+    "Consumer Spending", 
+    "Low Income Earnings"
+  )) %>%
+  filter(dates < '2020-06-01') %>%
+  ggplot() +
+  geom_hline(yintercept=0, size=0.5, alpha=0.25) +
+  geom_line(aes(x =dates, y=data, colour=value_id)) +
+  facet_grid(value_type ~ city, scales = "free") +
+  labs(
+    x='Date',
+    y='Relative Value',
+    title='Comparing Economic Conditions Across Cities',
+    colour=''
+  ) + 
+  scale_y_continuous(labels = scales::percent_format(1)) +
+  theme(
+    legend.position="bottom",
+    strip.text.y = element_text(size = 12, colour = "black", face = "bold"),
+    strip.text.x = element_text(size = 12, colour = "black", face = "bold")
+  )
+```
+
+All 3 cities have seen extreme economic shocks. Their consumer spending habits look quite similar - large increases in grocery expenditures and over 50% declines in any other category. On the other hand, their low income earnings profiles look a bit different; New York and Chicago had low earning workers in high income neighborhoods see a much sharper decline in wages. San Francisco shows the opposite pattern, with workers in low income zip codes more severely affected. 
+
+---
+
+There are plenty of other analyses to explore. In bringing together data sets from disparate sources, the C3.ai COVID-19 Data Lake permits in-depth and real-time data exploration. 
+
+If any publications or research results are derived in full or in part from the C3.ai COVID-19 Data Lake, please make sure to credit the C3.ai COVID-19 Data Lake by referencing the case study at https://c3.ai/customers/covid-19-data-lake/.

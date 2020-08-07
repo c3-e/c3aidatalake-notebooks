@@ -7,9 +7,13 @@ dependencies:
   - matplotlib
   - pandas=1.0.*
   - requests
+  - seaborn
   - scipy
   - r-base
   - r-httr
+  - r-maps
+  - r-mapproj
   - r-tidyverse
   - r-jsonlite
   - r-fitdistrplus
+  - r-hrbrthemes
